@@ -1,0 +1,9 @@
+# Kopiér denne fil til hosts.txt og udfyld dine egne servere.
+# Én server pr. linje: navn;host/IP[;brugernavn[;password]]
+# Brugernavn og password er valgfrie - udelades de, spørger launcheren.
+# OBS: password står i klartekst - læg kun filen et sted du selv styrer.
+#
+# Eksempler:
+# R710 kælder;192.168.1.120
+# R620 lab;192.168.1.121;root
+# R720 test;192.168.1.122;root;calvin

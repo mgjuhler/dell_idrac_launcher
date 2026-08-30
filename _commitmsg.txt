@@ -1,0 +1,11 @@
+Add one-click launcher that auto-downloads the viewer from the iDRAC
+
+idrac.bat/idrac.ps1 replaces the manual setup: it fetches avctKVM.jar
+and the native library DLLs directly from the iDRAC (cached per host),
+silently installs the bundled JRE 7 to C:\jre if Java is missing, and
+launches the console. Optional hosts.txt gives a saved-server menu;
+host/user/password can also be passed as arguments for true one-click
+shortcuts.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AzEfunTyy6bZCe3ERUHUJJ
