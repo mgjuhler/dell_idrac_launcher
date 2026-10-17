@@ -8,6 +8,10 @@
 #   idrac.ps1 [-DracHost <ip>] [-User <name>] [-Password <pw>] [-Refresh]
 # With no arguments it shows a menu from hosts.txt (if present) or prompts.
 # -Refresh throws away the cached viewer files and downloads them again.
+#
+# Must stay compatible with Windows PowerShell 2.0 on .NET 3.5 (Windows 7):
+# no [pscustomobject], -File/-Directory, Unblock-File, .NET 4.5 APIs, and
+# no bare "if" statements used as values.
 
 param(
     [string]$DracHost,
@@ -27,16 +31,40 @@ $brokenCachePattern = 'ClassNotFoundException|NoClassDefFoundError|UnsatisfiedLi
 
 try {
 
-# Files from a downloaded zip carry the "mark of the web", which makes
-# Windows show extra security prompts for the JRE installer.
-Get-ChildItem -LiteralPath $scriptDir -File | Unblock-File -ErrorAction SilentlyContinue
+$nativeHelpers = $false
+try {
+    Add-Type -Namespace IdracLauncher -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool DeleteFile(string path);
 
-# Old iDRACs use self-signed certs and only speak old TLS versions.
-[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+public static void TrustAllCertificates() {
+    System.Net.ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
+}
+'@
+    $nativeHelpers = $true
+} catch { }
+
+# Files from a downloaded zip carry the "mark of the web", which makes
+# Windows show extra security prompts for the JRE installer. Unblock-File
+# needs PowerShell 3, so delete the Zone.Identifier stream directly.
+if ($nativeHelpers) {
+    Get-ChildItem -LiteralPath $scriptDir | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
+        [void][IdracLauncher.Native]::DeleteFile($_.FullName + ':Zone.Identifier')
+    }
+}
+
+# Old iDRACs use self-signed certs and only speak old TLS versions. A C#
+# delegate is safer than a scriptblock on PowerShell 2.0.
+if ($nativeHelpers) {
+    [IdracLauncher.Native]::TrustAllCertificates()
+} else {
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+}
 $protocols = [Net.SecurityProtocolType]::Tls
 foreach ($name in 'Tls11', 'Tls12', 'Ssl3') {
     try {
-        [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::$name
+        # .NET 3.5 has no Tls11/Tls12 - Parse throws and the name is skipped.
+        [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Enum]::Parse([Net.SecurityProtocolType], $name)
         $protocols = [Net.ServicePointManager]::SecurityProtocol
     } catch { }
 }
@@ -52,24 +80,21 @@ function ConvertTo-ArgString([string[]]$Arguments) {
     }) -join ' '
 }
 
-# Runs a console program and captures its output without letting Windows
-# PowerShell turn stderr lines into terminating errors.
-function Invoke-Native([string]$Exe, [string[]]$Arguments, [int]$TimeoutMs = 120000) {
+# Runs a console program and captures its stderr (where java -version,
+# curl and IdracFetch report) without letting Windows PowerShell turn
+# stderr lines into terminating errors. Only stderr is redirected, so a
+# synchronous read cannot deadlock.
+function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
     $psi.Arguments = ConvertTo-ArgString $Arguments
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $proc = [Diagnostics.Process]::Start($psi)
-    $stdout = $proc.StandardOutput.ReadToEndAsync()
-    $stderr = $proc.StandardError.ReadToEndAsync()
-    if (-not $proc.WaitForExit($TimeoutMs)) {
-        try { $proc.Kill() } catch { }
-        return [pscustomobject]@{ ExitCode = -1; Output = 'Timeout' }
-    }
-    [pscustomobject]@{ ExitCode = $proc.ExitCode; Output = $stdout.Result + $stderr.Result }
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    New-Object PSObject -Property @{ ExitCode = $proc.ExitCode; Output = $stderr }
 }
 
 function Get-InnermostMessage($ErrorRecord) {
@@ -115,7 +140,7 @@ function ConvertFrom-HostInput([string]$Text) {
         $text = $Matches[1]
         $port = [int]$Matches[2]
     }
-    [pscustomobject]@{ Address = $text; WebPort = $port }
+    New-Object PSObject -Property @{ Address = $text; WebPort = $port }
 }
 
 # Notepad saves UTF-8 without BOM, Windows PowerShell assumes ANSI - try
@@ -141,11 +166,15 @@ function Read-HostsFile {
                 Write-Host "Springer over ugyldig linje i hosts.txt: $_" -ForegroundColor Yellow
                 return
             }
-            [pscustomobject]@{
+            $entryUser = $null
+            $entryPassword = $null
+            if ($parts.Count -gt 2 -and $parts[2].Trim()) { $entryUser = $parts[2].Trim() }
+            if ($parts.Count -gt 3 -and $parts[3] -ne '') { $entryPassword = $parts[3] }
+            New-Object PSObject -Property @{
                 Name     = $parts[0].Trim()
                 Address  = $parts[1].Trim()
-                User     = if ($parts.Count -gt 2 -and $parts[2].Trim()) { $parts[2].Trim() } else { $null }
-                Password = if ($parts.Count -gt 3 -and $parts[3] -ne '') { $parts[3] } else { $null }
+                User     = $entryUser
+                Password = $entryPassword
             }
         })
 }
@@ -158,7 +187,8 @@ function Find-Java {
     foreach ($root in $env:ProgramFiles, ${env:ProgramFiles(x86)}) {
         if (-not $root) { continue }
         $candidates += Join-Path $root 'Java\jre7\bin\java.exe'
-        $candidates += @(Get-ChildItem -Path (Join-Path $root 'Java') -Directory -Filter 'jre1.8*' -ErrorAction SilentlyContinue |
+        $candidates += @(Get-ChildItem -Path (Join-Path $root 'Java') -Filter 'jre1.8*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer } |
             Sort-Object Name -Descending | ForEach-Object { Join-Path $_.FullName 'bin\java.exe' })
     }
     foreach ($candidate in $candidates) {
@@ -168,8 +198,10 @@ function Find-Java {
 }
 
 function Install-BundledJava {
-    $is64BitOs = [Environment]::Is64BitOperatingSystem
-    $installer = Join-Path $scriptDir $(if ($is64BitOs) { 'jre-7u80-windows-x64.exe' } else { 'jre-7u80-windows-i586.exe' })
+    $is64BitOs = ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') -or ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')
+    $installerName = 'jre-7u80-windows-i586.exe'
+    if ($is64BitOs) { $installerName = 'jre-7u80-windows-x64.exe' }
+    $installer = Join-Path $scriptDir $installerName
     if (-not (Test-Path -LiteralPath $installer)) {
         Write-Host "Installationsfilen mangler: $installer" -ForegroundColor Yellow
         return $false
@@ -233,15 +265,11 @@ function Get-DracFile([string]$Url, [string]$Dest) {
     throw "Kunne ikke hente $Url`n  " + ($errors -join "`n  ")
 }
 
+# Unpacked with Java: .NET 3.5 (PowerShell 2.0 on Windows 7) cannot read zips.
 function Expand-Dlls([string]$JarPath, [string]$TargetDir) {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [IO.Compression.ZipFile]::OpenRead($JarPath)
-    try {
-        foreach ($entry in ($zip.Entries | Where-Object { $_.Name -like '*.dll' })) {
-            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $TargetDir $entry.Name), $true)
-        }
-    } finally {
-        $zip.Dispose()
+    $result = Invoke-Native $java @('-cp', (Join-Path $scriptDir 'fetch'), 'IdracFetch', '--extract-dlls', $JarPath, $TargetDir)
+    if ($result.ExitCode -ne 0) {
+        throw "Kunne ikke pakke $JarPath ud: $($result.Output.Trim())"
     }
 }
 
@@ -324,7 +352,8 @@ function Save-HostEntry {
     if ($known.Count -gt 0) { return }
     $answer = Read-Host "Gem $DracHost i hosts.txt, så den står i menuen næste gang? (j/N)"
     if ($answer -notmatch '^[jJyY]') { return }
-    $address = if ($webPort -eq 443) { $DracHost } else { "${DracHost}:$webPort" }
+    $address = $DracHost
+    if ($webPort -ne 443) { $address = "${DracHost}:$webPort" }
     $line = "$DracHost;$address"
     $answer = Read-Host 'Gem også brugernavn og password? Password gemmes i klartekst. (j/N)'
     if ($answer -match '^[jJyY]') { $line += ";$User;$Password" }
@@ -372,7 +401,8 @@ if (-not $DracHost) {
 $parsed = ConvertFrom-HostInput $DracHost
 $DracHost = $parsed.Address
 $webPort = $parsed.WebPort
-$baseUrl = if ($webPort -eq 443) { "https://$DracHost" } else { "https://${DracHost}:$webPort" }
+$baseUrl = "https://$DracHost"
+if ($webPort -ne 443) { $baseUrl = "https://${DracHost}:$webPort" }
 
 # --- Check that the iDRAC answers before asking for anything else ---
 Write-Host "Tjekker forbindelsen til $DracHost ..."
@@ -398,15 +428,16 @@ if (-not $Password) {
 $java = Find-Java
 if (-not $java -and (Install-BundledJava)) { $java = Find-Java }
 if (-not $java) {
-    $pathJava = Get-Command java.exe -ErrorAction SilentlyContinue
-    if (-not $pathJava) {
+    $pathJava = @(Get-Command java.exe -ErrorAction SilentlyContinue)
+    if ($pathJava.Count -eq 0) {
         throw 'Java er ikke installeret, og den medfølgende Java kunne ikke installeres. Start idrac.bat igen og klik "Ja" til administratorrettigheder.'
     }
-    $java = $pathJava.Source
+    $java = $pathJava[0].Definition
     Write-Host "Bruger den Java der allerede er installeret ($java). Virker konsollen ikke, så start igen og lad den medfølgende Java 7 blive installeret." -ForegroundColor Yellow
 }
-$versionInfo = Invoke-Native $java @('-version') 30000
-$archSuffix = if ($versionInfo.Output -match '64-Bit') { '64' } else { '32' }
+$versionInfo = Invoke-Native $java @('-version')
+$archSuffix = '32'
+if ($versionInfo.Output -match '64-Bit') { $archSuffix = '64' }
 
 New-Item -ItemType Directory -Force -Path $appDir | Out-Null
 $securityFile = Get-JavaSecurityOverride
@@ -420,7 +451,7 @@ $jarPath = Join-Path $cacheDir 'avctKVM.jar'
 # One log pair per launch: a running console keeps its log files open.
 $logDir = Join-Path $appDir 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-Get-ChildItem -LiteralPath $logDir -File | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
+Get-ChildItem -LiteralPath $logDir | Where-Object { -not $_.PSIsContainer -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
     Remove-Item -Force -ErrorAction SilentlyContinue
 $logStamp = '{0:yyyyMMdd-HHmmss}-{1}' -f (Get-Date), $PID
 $outLog = Join-Path $logDir "$logStamp-out.log"

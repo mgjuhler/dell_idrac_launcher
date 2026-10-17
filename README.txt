@@ -7,7 +7,7 @@ sikkerhedsindstillinger.
 
 Originalen er lavet af: https://gist.github.com/xbb/4fd651c2493ad9284dbcb827dc8886d6
 
-Krav: Windows 10 eller 11 (64-bit) og netværksadgang til iDRAC'en.
+Krav: Windows 7 eller nyere (32- eller 64-bit) og netværksadgang til iDRAC'en.
 
 
 Kom i gang (3 trin)
@@ -101,7 +101,8 @@ Filer
 idrac.bat                 Det du dobbeltklikker på
 idrac.ps1                 Selve programmet
 fetch\                    Hjælpeprogram til at hente filer over gammel TLS
-jre-7u80-windows-x64.exe  Java 7 (installeres kun hvis Java mangler)
+jre-7u80-windows-x64.exe  Java 7 til 64-bit Windows (installeres kun hvis Java mangler)
+jre-7u80-windows-i586.exe Java 7 til 32-bit Windows
 hosts.example.txt         Skabelon til gemte servere
 
 start_promt.bat og start_quick.bat (kun i git-repoet) er den gamle manuelle

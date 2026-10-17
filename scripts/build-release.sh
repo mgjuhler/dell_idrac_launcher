@@ -9,7 +9,7 @@ trap 'rm -rf "$stage"' EXIT
 
 pkg="$stage/dell_idrac_launcher"
 mkdir -p "$pkg/fetch"
-cp "$root"/{idrac.bat,idrac.ps1,README.txt,hosts.example.txt,jre-7u80-windows-x64.exe} "$pkg/"
+cp "$root"/{idrac.bat,idrac.ps1,README.txt,hosts.example.txt,jre-7u80-windows-x64.exe,jre-7u80-windows-i586.exe} "$pkg/"
 cp "$root"/fetch/*.class "$root"/fetch/IdracFetch.java "$pkg/fetch/"
 
 # Windows tools need CRLF (and the BOM on idrac.ps1 for Danish letters).
